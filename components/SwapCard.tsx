@@ -1,17 +1,41 @@
 "use client";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { ArrowDownUp, ChevronDown } from "lucide-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { LAMPORTS_PER_SOL, VersionedTransaction } from "@solana/web3.js";
-import axios from "axios";
 
 type TokenSymbol = "SOL" | "USDC";
 
-const tokenAddress: Record<TokenSymbol, string> = {
-  SOL: "So11111111111111111111111111111111111111112",
-  USDC: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+interface TokenConfig {
+  address: string;
+  decimals: number;
+}
+
+const TOKENS: Record<TokenSymbol, TokenConfig> = {
+  SOL: {
+    address: "So11111111111111111111111111111111111111112",
+    decimals: 9,
+  },
+  USDC: {
+    address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    decimals: 6,
+  },
 };
+
+const JUPITER_API_BASE = "https://lite-api.jup.ag/swap/v1";
+const SLIPPAGE_BPS = 50;
+
+interface QuoteResponse {
+  inputMint: string;
+  inAmount: string;
+  outputMint: string;
+  outAmount: string;
+  otherAmountThreshold: string;
+  swapMode: string;
+  slippageBps: number;
+  priceImpactPct: string;
+}
 
 export default function SwapCard() {
   const [fromAmount, setFromAmount] = useState("");
@@ -19,141 +43,176 @@ export default function SwapCard() {
   const [fromToken, setFromToken] = useState<TokenSymbol>("SOL");
   const [toToken, setToToken] = useState<TokenSymbol>("USDC");
   const [balance, setBalance] = useState(0);
-  const { publicKey } = useWallet();
-  const wallet = useWallet();
+  const [isLoadingQuote, setIsLoadingQuote] = useState(false);
+  const [isSwapping, setIsSwapping] = useState(false);
+  const [currentQuote, setCurrentQuote] = useState<QuoteResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const { publicKey, signTransaction } = useWallet();
   const { connection } = useConnection();
 
-  const handleSwapTokens = () => {
-    // Swap the tokens
-    setFromToken(toToken);
-    setToToken(fromToken);
-    // Swap the amounts
-    setFromAmount(toAmount);
-    setToAmount(fromAmount);
-  };
+  // Memoized token configurations
+  const fromTokenConfig = useMemo(() => TOKENS[fromToken], [fromToken]);
+  const toTokenConfig = useMemo(() => TOKENS[toToken], [toToken]);
 
-  const getWalletBalance = async () => {
-    if (wallet) {
-      try {
-        const lamports = await connection.getBalance(publicKey!);
-        setBalance(lamports / LAMPORTS_PER_SOL);
-      } catch (error) {
-        console.log(error);
-        setBalance(0);
-      }
-    } else {
-      setBalance(0);
-    }
-  };
-
-  async function getQuote() {
-    const inputMint = tokenAddress[fromToken];
-    const outputMint = tokenAddress[toToken];
-
-    try {
-      const amountInDecimals =
-        fromToken === "SOL"
-          ? Number(fromAmount) * LAMPORTS_PER_SOL
-          : Number(fromAmount) * 10 ** 6;
-
-      const response = await axios.get(
-        `https://lite-api.jup.ag/swap/v1/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${Math.floor(
-          amountInDecimals
-        )}&slippageBps=50`
-      );
-
-      const quoteResponse = response.data;
-      console.log("Quote Response:", quoteResponse);
-
-      const outAmount = quoteResponse.outAmount;
-
-      const convertedOutAmount =
-        toToken === "SOL" ? outAmount / LAMPORTS_PER_SOL : outAmount / 10 ** 6;
-
-      setToAmount(convertedOutAmount.toFixed(6));
-    } catch (err) {
-      console.error("Failed to fetch quote:", err);
-      setToAmount("");
-    }
-  }
-
-  useEffect(() => {
-    if (!publicKey || !connection) return;
-
-    const fetchBalance = async () => {
-      await getWalletBalance();
-    };
-
-    fetchBalance();
-  }, [publicKey, connection]);
-
-  useEffect(() => {
-    if (!fromAmount || isNaN(Number(fromAmount)) || Number(fromAmount) <= 0) {
-      return;
-    }
-    (async () => {
-      await getQuote();
-    })();
-  }, [fromAmount, fromToken, toToken]);
+  // Calculate exchange rate from quote
+  const exchangeRate = useMemo(() => {
+    if (!currentQuote || !fromAmount || !toAmount) return null;
+    
+    const rate = Number(toAmount) / Number(fromAmount);
+    return `1 ${fromToken} = ${rate.toFixed(4)} ${toToken}`;
+  }, [currentQuote, fromAmount, toAmount, fromToken, toToken]);
 
   
-
-  async function SwapCoin() {
-    if (!fromAmount || !fromToken || !toToken) return;
-
-    const inputMint = tokenAddress[fromToken];
-    const outputMint = tokenAddress[toToken];
-
-    const response = await axios.get(
-      `https://lite-api.jup.ag/swap/v1/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${fromAmount}&slippageBps=50`
-    );
-    const quoteResponse = response.data;
-    console.log(quoteResponse);
+  const fetchBalance = useCallback(async () => {
+    if (!publicKey || !connection) {
+      setBalance(0);
+      return;
+    }
 
     try {
-      const {
-        data: { swapTransaction },
-      } = await await axios.post("https://lite-api.jup.ag/swap/v1/swap", {
-        quoteResponse,
-        userPublicKey: wallet.publicKey?.toString(),
+      const lamports = await connection.getBalance(publicKey);
+      setBalance(lamports / LAMPORTS_PER_SOL);
+    } catch (error) {
+      console.error("Failed to fetch balance:", error);
+      setBalance(0);
+    }
+  }, [publicKey, connection]);
+
+  
+  const fetchQuote = useCallback(async () => {
+    if (!fromAmount || isNaN(Number(fromAmount)) || Number(fromAmount) <= 0) {
+      setToAmount("");
+      setCurrentQuote(null);
+      return;
+    }
+
+    setIsLoadingQuote(true);
+    setError(null);
+
+    try {      
+      const amountInSmallestUnit = Math.floor(
+        Number(fromAmount) * Math.pow(10, fromTokenConfig.decimals)
+      );
+
+      const params = new URLSearchParams({
+        inputMint: fromTokenConfig.address,
+        outputMint: toTokenConfig.address,
+        amount: amountInSmallestUnit.toString(),
+        slippageBps: SLIPPAGE_BPS.toString(),
       });
-      console.log("swapTransaction");
 
-      const swapTransactionBuf = Buffer.from(swapTransaction, "base64");
-      const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
-      console.log(transaction);
-
-      if (!wallet.signTransaction) {
-        console.error("Wallet does not support signTransaction.");
-        return;
+      const response = await fetch(`${JUPITER_API_BASE}/quote?${params}`);
+      
+      if (!response.ok) {
+        throw new Error(`Failed to fetch quote: ${response.statusText}`);
       }
 
-      const signedTx = await wallet.signTransaction(transaction);
+      const quoteData: QuoteResponse = await response.json();
+      setCurrentQuote(quoteData);
+      
+      const outputAmount =
+        Number(quoteData.outAmount) / Math.pow(10, toTokenConfig.decimals);
+      
+      setToAmount(outputAmount.toFixed(6));
+    } catch (err) {
+      console.error("Quote fetch error:", err);
+      setError("Failed to fetch quote. Please try again.");
+      setToAmount("");
+      setCurrentQuote(null);
+    } finally {
+      setIsLoadingQuote(false);
+    }
+  }, [fromAmount, fromTokenConfig, toTokenConfig]);
+  
+  const handleSwapTokens = useCallback(() => {
+    setFromToken(toToken);
+    setToToken(fromToken);
+    setFromAmount(toAmount);
+    setToAmount(fromAmount);
+    setCurrentQuote(null);
+  }, [fromToken, toToken, fromAmount, toAmount]);
 
-      const latestBlockHash = await connection.getLatestBlockhash();
+  
+  const executeSwap = useCallback(async () => {
+    if (!currentQuote || !publicKey || !signTransaction) {
+      setError("Please connect your wallet to swap");
+      return;
+    }
 
-      const rawTransaction = signedTx.serialize();
+    setIsSwapping(true);
+    setError(null);
+
+    try {      
+      const swapResponse = await fetch(`${JUPITER_API_BASE}/swap`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          quoteResponse: currentQuote,
+          userPublicKey: publicKey.toString(),
+          wrapAndUnwrapSol: true,
+        }),
+      });
+
+      if (!swapResponse.ok) {
+        throw new Error(`Swap request failed: ${swapResponse.statusText}`);
+      }
+
+      const { swapTransaction } = await swapResponse.json();
+      
+      const transactionBuffer = Buffer.from(swapTransaction, "base64");
+      const transaction = VersionedTransaction.deserialize(transactionBuffer);
+      const signedTransaction = await signTransaction(transaction);
+      
+      const rawTransaction = signedTransaction.serialize();
       const txid = await connection.sendRawTransaction(rawTransaction, {
         skipPreflight: true,
         maxRetries: 2,
       });
+      
+      const latestBlockhash = await connection.getLatestBlockhash();
       await connection.confirmTransaction({
-        blockhash: latestBlockHash.blockhash,
-        lastValidBlockHeight: latestBlockHash.lastValidBlockHeight,
+        blockhash: latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
         signature: txid,
       });
-      console.log(`https://solscan.io/tx/${txid}`);
-    } catch (error) {
-      console.error("Swap failed:", error);
+
+      console.log(`Transaction successful: https://solscan.io/tx/${txid}`);
+            
+      setFromAmount("");
+      setToAmount("");
+      setCurrentQuote(null);
+      await fetchBalance();
+      
+    } catch (err) {
+      console.error("Swap failed:", err);
+      setError(err instanceof Error ? err.message : "Swap failed. Please try again.");
+    } finally {
+      setIsSwapping(false);
     }
-  }
+  }, [currentQuote, publicKey, signTransaction, connection, fetchBalance]);
+
+  
+  useEffect(() => {
+    fetchBalance();
+  }, [fetchBalance]);
+  
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      fetchQuote();
+    }, 500);
+
+    return () => clearTimeout(timeoutId);
+  }, [fetchQuote]);
 
   return (
     <div className="min-h-screen w-full bg-linear-to-br from-zinc-950 via-black to-zinc-950 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
         <div className="flex items-center justify-between mb-8">
           <h1 className="text-2xl font-bold text-white">Swap</h1>
-          <WalletMultiButton />
+          <WalletMultiButton />``
         </div>
 
         <div className="bg-zinc-900/50 backdrop-blur-xl rounded-3xl border border-zinc-800/50 p-4 space-y-1">
@@ -185,7 +244,8 @@ export default function SwapCard() {
           <div className="flex justify-center -my-3 relative z-10">
             <button
               onClick={handleSwapTokens}
-              className="p-2 bg-zinc-800 hover:bg-zinc-700 rounded-xl border-4 border-zinc-900/50 transition-all hover:scale-110"
+              disabled={isLoadingQuote || isSwapping}
+              className="p-2 bg-zinc-800 hover:bg-zinc-700 rounded-xl border-4 border-zinc-900/50 transition-all hover:scale-110 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <ArrowDownUp className="w-4 h-4 text-zinc-400" />
             </button>
@@ -196,13 +256,14 @@ export default function SwapCard() {
               <span className="text-xs text-zinc-500 font-medium">
                 You receive
               </span>
-              <span className="text-xs text-zinc-600">Balance: 0.00</span>
+              <span className="text-xs text-zinc-600">
+                {isLoadingQuote ? "Loading..." : ""}
+              </span>
             </div>
             <div className="flex items-center justify-between gap-4">
               <input
                 type="text"
                 value={toAmount}
-                onChange={(e) => setToAmount(e.target.value)}
                 placeholder="0"
                 readOnly
                 className="bg-transparent text-4xl font-bold text-white outline-none w-full placeholder:text-zinc-800"
@@ -216,23 +277,46 @@ export default function SwapCard() {
               </button>
             </div>
           </div>
-
-          {fromAmount && toAmount && (
+          
+          {exchangeRate && (
             <div className="pt-3 px-1 space-y-2">
               <div className="flex items-center justify-between text-sm">
                 <span className="text-zinc-500">Rate</span>
                 <span className="text-zinc-300 font-medium">
-                  1 SOL = 150 USDC
+                  {exchangeRate}
                 </span>
               </div>
+              {currentQuote?.priceImpactPct && (
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-zinc-500">Price Impact</span>
+                  <span className="text-zinc-300 font-medium">
+                    {Number(currentQuote.priceImpactPct).toFixed(2)}%
+                  </span>
+                </div>
+              )}
             </div>
           )}
 
+          
+          {error && (
+            <div className="mt-2 p-3 bg-red-500/10 border border-red-500/20 rounded-xl">
+              <p className="text-sm text-red-400">{error}</p>
+            </div>
+          )}
+
+          
           <button
-            className="w-full py-4 bg-white hover:bg-zinc-100 text-black font-bold text-base rounded-2xl transition-all transform hover:scale-[1.01] active:scale-[0.99] mt-4"
-            onClick={wallet ? SwapCoin : undefined}
+            className="w-full py-4 bg-white hover:bg-zinc-100 text-black font-bold text-base rounded-2xl transition-all transform hover:scale-[1.01] active:scale-[0.99] mt-4 disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={executeSwap}
+            disabled={!publicKey || !currentQuote || isSwapping || isLoadingQuote}
           >
-            {wallet ? "Swap" : "Connect Wallet"}
+            {!publicKey
+              ? "Connect Wallet"
+              : isSwapping
+              ? "Swapping..."
+              : isLoadingQuote
+              ? "Loading Quote..."
+              : "Swap"}
           </button>
         </div>
       </div>
