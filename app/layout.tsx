@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { SolanaProvider } from "@/components/providers/SolanaProvider";
 import { Toaster } from "sonner";
+import { Analytics } from "@vercel/analytics/next";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -16,7 +17,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Token Swap",
-  description: "Swap between SOL and USDC",
+  description: "Swap between SOL a",
 };
 
 export default function RootLayout({
@@ -31,6 +32,7 @@ export default function RootLayout({
       >
        <SolanaProvider> {children}</SolanaProvider>
        <Toaster />
+       <Analytics />
       </body>
     </html>
   );
