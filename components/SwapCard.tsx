@@ -4,6 +4,7 @@ import { ArrowDownUp, ChevronDown } from "lucide-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { LAMPORTS_PER_SOL, VersionedTransaction } from "@solana/web3.js";
+import { toast } from "sonner";
 
 type TokenSymbol = "SOL" | "USDC";
 
@@ -51,19 +52,16 @@ export default function SwapCard() {
   const { publicKey, signTransaction } = useWallet();
   const { connection } = useConnection();
 
-  // Memoized token configurations
   const fromTokenConfig = useMemo(() => TOKENS[fromToken], [fromToken]);
   const toTokenConfig = useMemo(() => TOKENS[toToken], [toToken]);
 
-  // Calculate exchange rate from quote
   const exchangeRate = useMemo(() => {
     if (!currentQuote || !fromAmount || !toAmount) return null;
-    
+
     const rate = Number(toAmount) / Number(fromAmount);
     return `1 ${fromToken} = ${rate.toFixed(4)} ${toToken}`;
   }, [currentQuote, fromAmount, toAmount, fromToken, toToken]);
 
-  
   const fetchBalance = useCallback(async () => {
     if (!publicKey || !connection) {
       setBalance(0);
@@ -79,7 +77,6 @@ export default function SwapCard() {
     }
   }, [publicKey, connection]);
 
-  
   const fetchQuote = useCallback(async () => {
     if (!fromAmount || isNaN(Number(fromAmount)) || Number(fromAmount) <= 0) {
       setToAmount("");
@@ -90,7 +87,7 @@ export default function SwapCard() {
     setIsLoadingQuote(true);
     setError(null);
 
-    try {      
+    try {
       const amountInSmallestUnit = Math.floor(
         Number(fromAmount) * Math.pow(10, fromTokenConfig.decimals)
       );
@@ -103,17 +100,17 @@ export default function SwapCard() {
       });
 
       const response = await fetch(`${JUPITER_API_BASE}/quote?${params}`);
-      
+
       if (!response.ok) {
-        throw new Error(`Failed to fetch quote: ${response.statusText}`);
+        console.error(`Failed to fetch quote: ${response.statusText}`);
       }
 
       const quoteData: QuoteResponse = await response.json();
       setCurrentQuote(quoteData);
-      
+
       const outputAmount =
         Number(quoteData.outAmount) / Math.pow(10, toTokenConfig.decimals);
-      
+
       setToAmount(outputAmount.toFixed(6));
     } catch (err) {
       console.error("Quote fetch error:", err);
@@ -124,7 +121,7 @@ export default function SwapCard() {
       setIsLoadingQuote(false);
     }
   }, [fromAmount, fromTokenConfig, toTokenConfig]);
-  
+
   const handleSwapTokens = useCallback(() => {
     setFromToken(toToken);
     setToToken(fromToken);
@@ -133,45 +130,62 @@ export default function SwapCard() {
     setCurrentQuote(null);
   }, [fromToken, toToken, fromAmount, toAmount]);
 
-  
   const executeSwap = useCallback(async () => {
     if (!currentQuote || !publicKey || !signTransaction) {
       setError("Please connect your wallet to swap");
       return;
     }
 
+    if (isSwapping || isLoadingQuote) return;
+
+    const amountNum = Number(fromAmount);
+    if (!amountNum || isNaN(amountNum) || amountNum <= 0) {
+      toast.error("Enter a valid amount.");
+      return;
+    }
+    if (amountNum > balance) {
+      toast.error("Insufficient balance.");
+      return;
+    }
+
     setIsSwapping(true);
     setError(null);
 
-    try {      
-      const swapResponse = await fetch(`${JUPITER_API_BASE}/swap`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          quoteResponse: currentQuote,
-          userPublicKey: publicKey.toString(),
-          wrapAndUnwrapSol: true,
-        }),
-      });
+    try {
+      const swapResponse = await fetch(
+        `${JUPITER_API_BASE}/s
+        wap`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            quoteResponse: currentQuote,
+            userPublicKey: publicKey.toString(),
+            wrapAndUnwrapSol: true,
+          }),
+        }
+      );
 
       if (!swapResponse.ok) {
-        throw new Error(`Swap request failed: ${swapResponse.statusText}`);
+        toast("Swap Request failed", {
+          description: swapResponse.statusText,
+        });
       }
 
       const { swapTransaction } = await swapResponse.json();
-      
+
       const transactionBuffer = Buffer.from(swapTransaction, "base64");
       const transaction = VersionedTransaction.deserialize(transactionBuffer);
       const signedTransaction = await signTransaction(transaction);
-      
+
       const rawTransaction = signedTransaction.serialize();
       const txid = await connection.sendRawTransaction(rawTransaction, {
         skipPreflight: true,
         maxRetries: 2,
       });
-      
+
       const latestBlockhash = await connection.getLatestBlockhash();
       await connection.confirmTransaction({
         blockhash: latestBlockhash.blockhash,
@@ -179,26 +193,26 @@ export default function SwapCard() {
         signature: txid,
       });
 
-      console.log(`Transaction successful: https://solscan.io/tx/${txid}`);
-            
+      toast.success("Swap successful!", {
+        description: `View on Solscan: https://solscan.io/tx/${txid}`,
+      });
+
       setFromAmount("");
       setToAmount("");
       setCurrentQuote(null);
       await fetchBalance();
-      
     } catch (err) {
       console.error("Swap failed:", err);
-      setError(err instanceof Error ? err.message : "Swap failed. Please try again.");
+      toast.error("Something went wrong during swap.");
     } finally {
       setIsSwapping(false);
     }
   }, [currentQuote, publicKey, signTransaction, connection, fetchBalance]);
 
-  
   useEffect(() => {
     fetchBalance();
   }, [fetchBalance]);
-  
+
   useEffect(() => {
     const timeoutId = setTimeout(() => {
       fetchQuote();
@@ -212,16 +226,13 @@ export default function SwapCard() {
       <div className="w-full max-w-md">
         <div className="flex items-center justify-between mb-8">
           <h1 className="text-2xl font-bold text-white">Swap</h1>
-          <WalletMultiButton />``
+          <WalletMultiButton />
         </div>
 
         <div className="bg-zinc-900/50 backdrop-blur-xl rounded-3xl border border-zinc-800/50 p-4 space-y-1">
           <div className="bg-zinc-900/80 rounded-2xl p-4 hover:bg-zinc-900 transition-colors">
             <div className="flex items-center justify-between mb-3">
               <span className="text-xs text-zinc-500 font-medium">You pay</span>
-              <span className="text-xs text-zinc-600">
-                Balance: {balance.toFixed(4)}
-              </span>
             </div>
             <div className="flex items-center justify-between gap-4">
               <input
@@ -277,7 +288,7 @@ export default function SwapCard() {
               </button>
             </div>
           </div>
-          
+
           {exchangeRate && (
             <div className="pt-3 px-1 space-y-2">
               <div className="flex items-center justify-between text-sm">
@@ -297,18 +308,18 @@ export default function SwapCard() {
             </div>
           )}
 
-          
           {error && (
             <div className="mt-2 p-3 bg-red-500/10 border border-red-500/20 rounded-xl">
               <p className="text-sm text-red-400">{error}</p>
             </div>
           )}
 
-          
           <button
             className="w-full py-4 bg-white hover:bg-zinc-100 text-black font-bold text-base rounded-2xl transition-all transform hover:scale-[1.01] active:scale-[0.99] mt-4 disabled:opacity-50 disabled:cursor-not-allowed"
             onClick={executeSwap}
-            disabled={!publicKey || !currentQuote || isSwapping || isLoadingQuote}
+            disabled={
+              !publicKey || !currentQuote || isSwapping || isLoadingQuote
+            }
           >
             {!publicKey
               ? "Connect Wallet"
